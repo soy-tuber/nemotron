@@ -1,0 +1,20 @@
+# ~/.config/systemd/user/nemotron-decide.service にコピー(またはsymlink)して:
+# Copy or symlink into ~/.config/systemd/user/, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now nemotron-decide
+[Unit]
+Description=Nemotron Decide (closed-set decisions on port 8200)
+After=nemotron-gateway.service
+Wants=nemotron-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nemotron
+Environment=NEMOTRON_GATEWAY_URL=http://127.0.0.1:8000/v1
+Environment=NEMOTRON_DECIDE_MODEL=nemotron-9b-japanese
+Environment=NEMOTRON_DECISIONS=%h/nemotron/decide/decisions.yaml
+ExecStart=/usr/bin/env python3 -m uvicorn decide.server:app --host 127.0.0.1 --port 8200
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

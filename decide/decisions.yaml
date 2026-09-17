@@ -1,0 +1,89 @@
+# 判断カタログ / Decision catalogue
+#
+# ここに定義したもの以外は返ってこない。モデルは文章を書かず、ラベルを1個選ぶだけ。
+# Nothing outside this file can come back. The model writes no prose; it picks
+# one label, and we keep the distribution over the label set.
+#
+# {var} は呼び出し時に埋める / {var} placeholders are filled at call time.
+
+version: 1
+
+defaults:
+  # 既定の下限。下回ったら choice=null で abstain する。
+  # Defaults; below these the call abstains with choice=null.
+  min_confidence: 0.60
+  min_coverage: 0.10
+
+decisions:
+  - name: route_inquiry
+    description: 問い合わせの振り分け / Route an inbound inquiry
+    question: |
+      次の問い合わせを、どの窓口に振り分けるべきか。
+      Which desk should the following inquiry be routed to?
+      ---
+      {input}
+      ---
+    options:
+      - key: billing
+        text: 課金・請求・返金 / billing, invoices, refunds
+      - key: technical
+        text: 不具合・エラー・動作不良 / bugs, errors, broken behaviour
+      - key: account
+        text: ログイン・権限・アカウント設定 / login, permissions, account settings
+      - key: sales
+        text: 新規契約・見積・プラン変更 / new contracts, quotes, plan changes
+      - key: other
+        text: 上のいずれにも当てはまらない / none of the above
+    min_confidence: 0.65
+
+  - name: needs_human
+    description: 人間に渡すべきか / Escalate to a human?
+    question: |
+      次のやりとりは、人間の担当者に引き継ぐべきか。
+      Should the following exchange be handed to a human operator?
+      ---
+      {input}
+      ---
+    options:
+      - key: escalate
+        text: 引き継ぐべき / hand it over
+      - key: automate
+        text: 自動応答で足りる / an automated reply suffices
+    min_confidence: 0.70
+
+  - name: urgency
+    description: 緊急度 1-5 / Urgency on a 1-5 scale
+    mode: scale
+    scale: {min: 1, max: 5}
+    labels:
+      "1": 急がない / no hurry
+      "3": 通常 / normal
+      "5": 即時対応 / immediate
+    question: |
+      次の内容の緊急度を 1(急がない) から 5(即時対応) で判定せよ。
+      Rate the urgency of the following from 1 (no hurry) to 5 (immediate).
+      ---
+      {input}
+      ---
+    # 尺度は分布そのものに意味があるので、勝者の確信度の下限は緩めに。
+    # For a scale the distribution itself is the answer, so keep the floor loose.
+    min_confidence: 0.30
+
+  - name: diff_risk
+    description: 差分のリスク判定 / Risk of a code change
+    question: |
+      次の変更をレビューなしでマージした場合のリスクはどれか。
+      What is the risk of merging the following change without review?
+      ---
+      {input}
+      ---
+    options:
+      - key: safe
+        text: ドキュメント・コメント・整形のみ / docs, comments, formatting only
+      - key: low
+        text: 局所的な変更、テスト済み / local change, covered by tests
+      - key: high
+        text: 挙動・APIの変更、後方互換に影響 / behaviour or API change
+      - key: critical
+        text: 認証・課金・データ削除に触れる / touches auth, billing, or deletion
+    min_confidence: 0.70
