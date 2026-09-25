@@ -76,8 +76,8 @@ Model (GPU, VRAM)             ← オンデマンドでロード/アンロード
 - **モデルレジストリ / Model registry** — `models.yaml`に全モデルを定義。フレームワーク・VRAM・起動引数を宣言的に管理 / All models declared in `models.yaml` with framework, VRAM, and launch args
 - **オンデマンドロード / On-demand loading** — リクエスト先のモデルが未ロードなら自動起動、別モデルがロード中なら入れ替え / Auto-starts the requested model; swaps out a different one if loaded
 - **アイドル停止 / Idle shutdown** — 10分間リクエストがなければvLLMプロセスを自動停止してVRAM解放 / Kills the vLLM process and frees VRAM after 10 min of inactivity
-- **ToolCall書き換え / ToolCall rewrite** — Nemotronの `<TOOLCALL>` XML形式をOpenAI互換の `tool_calls` に変換 / Converts Nemotron's `<TOOLCALL>` XML into OpenAI-compatible `tool_calls`
-- **Reasoning分離 / Reasoning separation** — `<think>` タグの内容を `reasoning_content` フィールドに分離 / Extracts `<think>` tag content into the `reasoning_content` field
+- **ToolCall書き換え / ToolCall rewrite** — Nemotronの `<TOOLCALL>` XML形式をOpenAI互換の `tool_calls` に変換（モデルごとに `toolcall_rewrite: true` で制御） / Converts Nemotron's `<TOOLCALL>` XML into OpenAI-compatible `tool_calls` (per-model opt-in via `toolcall_rewrite: true`)
+- **スワップ競合制御 / Swap contention control** — アクティブリクエスト処理中のモデル入れ替えをブロックし、`503 + Retry-After` を返す / Blocks model swap while requests are in flight; returns `503 + Retry-After`
 
 ### カスタムパーサー / Custom Parsers
 
@@ -87,7 +87,7 @@ Three parsers injected via vLLM's plugin system:
 
 | パーサー / Parser | 役割 / Role |
 |---------|------|
-| `reasoning_parser` | `<think>...</think>` をストリーミング中にリアルタイム分離 / Real-time streaming separation of thinking tags |
+| `reasoning_parser` | `<think>...</think>` をストリーミング中にリアルタイム分離し `reasoning_content` フィールドへ出力 / Real-time streaming separation of thinking tags into the `reasoning_content` field |
 | `tool_parser` | `<TOOLCALL>` を検出してOpenAI ToolCallオブジェクトに変換 / Detects `<TOOLCALL>` and converts to OpenAI ToolCall objects |
 | `tool_parser (streaming)` | 部分JSONの差分送信、30文字先読みバッファ、マルチツール対応 / Partial JSON delta streaming, 30-char lookahead buffer, multi-tool support |
 
