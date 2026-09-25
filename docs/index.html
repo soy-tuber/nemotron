@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="文章を書かせず、決められた選択肢から1つ選ばせて確率を読む JEV の考え方を、ローカルの Nemotron Nano 9B v2 Japanese と vLLM の logprobs で再現した。1回86 ms、確信度は当たりやすさと連動する。一方、特許の複数タグ付けでは速くならず、いちばん効いたのは入力の差し替えだった。">
+<meta name="author" content="soy-tuber">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="soy-tuber">
+<meta property="og:title" content="Decide, Don't Write">
+<meta property="og:description" content="JEV の「書かせずに選ばせる」をローカルの Nemotron 9B で再現し、特許タグ付けで確かめた記録。">
+<meta property="og:url" content="https://soy-tuber.github.io/nemotron/">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="https://soy-tuber.github.io/nemotron/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%232a78d6'/><rect x='7' y='17' width='4' height='8' rx='1' fill='white'/><rect x='14' y='9' width='4' height='16' rx='1' fill='white'/><rect x='21' y='13' width='4' height='12' rx='1' fill='white' opacity='.55'/></svg>">
+<title>Decide, Don't Write</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#F3F4F1; --surface:#FFFFFF; --raise:#EAECE7;
+  --ink:#15181A; --body:#2E3532; --muted:#68716C; --rule:#DDE0DA;
+  --grid:#E6E8E3; --axis:#C3C6BF;
+  --accent:#2a78d6; --accent-soft:rgba(42,120,214,.10); --accent-line:rgba(42,120,214,.40);
+  --caution:#A8422F; --caution-soft:rgba(168,66,47,.10);
+  --shadow:0 1px 2px rgba(20,25,22,.06),0 8px 24px -12px rgba(20,25,22,.16);
+  --serif:"Spectral",Georgia,"Hiragino Mincho ProN","Yu Mincho",serif;
+  --sans:"IBM Plex Sans","IBM Plex Sans JP",system-ui,-apple-system,"Hiragino Sans","Yu Gothic",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme: dark;
+    --ground:#111413; --surface:#181C1A; --raise:#202522;
+    --ink:#F1F3F0; --body:#C9CFCB; --muted:#8E9892; --rule:#2A302D;
+    --grid:#262B28; --axis:#3A413D;
+    --accent:#3987e5; --accent-soft:rgba(57,135,229,.14); --accent-line:rgba(57,135,229,.45);
+    --caution:#E0735C; --caution-soft:rgba(224,115,92,.12);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--ground);color:var(--body);font:16px/1.8 var(--sans);font-feature-settings:"palt" 1}
+main{max-width:780px;margin:0 auto;padding:56px 16px 96px}
+a{color:var(--accent);text-underline-offset:3px}
+h1,h2,h3{color:var(--ink);font-family:var(--serif);font-weight:600;line-height:1.3;letter-spacing:.005em}
+h1{font-size:clamp(2.2rem,6vw,3.2rem);margin:.2em 0 .15em}
+h2{font-size:clamp(1.35rem,3.4vw,1.7rem);margin:3.2rem 0 .9rem;padding-top:1.4rem;border-top:1px solid var(--rule)}
+h3{font-size:1.1rem;margin:2rem 0 .6rem;font-family:var(--sans)}
+p{margin:.9em 0}
+.kicker{font:500 .8rem/1.4 var(--mono);color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.dek{font-size:1.12rem;color:var(--body);margin:.4rem 0 1.2rem}
+.byline{font:.85rem/1.6 var(--mono);color:var(--muted)}
+code,kbd{font:500 .88em var(--mono);background:var(--raise);padding:.08em .35em;border-radius:4px;color:var(--ink)}
+pre{font:.84rem/1.6 var(--mono);background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:14px 16px;overflow-x:auto;color:var(--ink)}
+pre code{background:none;padding:0;font-size:1em}
+strong{color:var(--ink);font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:1.8rem 0 .6rem}
+.tile{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow)}
+.tile .label{font-size:.82rem;color:var(--muted);line-height:1.45}
+.tile .value{font:600 1.7rem/1.2 var(--sans);color:var(--ink);margin-top:6px;letter-spacing:-.01em}
+.tile .sub{font-size:.8rem;color:var(--muted);margin-top:4px;line-height:1.45}
+.note{font-size:.88rem;color:var(--muted)}
+.callout{background:var(--accent-soft);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;padding:12px 16px;margin:1.4rem 0}
+.callout.caution{background:var(--caution-soft);border-left-color:var(--caution)}
+.callout p{margin:.3em 0}
+.table-wrap{overflow-x:auto;margin:1.1rem 0;border:1px solid var(--rule);border-radius:10px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:.9rem;line-height:1.5}
+caption{caption-side:top;text-align:left;font-size:.82rem;color:var(--muted);padding:10px 14px 0}
+th,td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--rule);vertical-align:top}
+thead th{font-weight:600;color:var(--ink);font-size:.82rem;background:var(--raise);white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.hl td{background:var(--accent-soft)}
+.pipeline{list-style:none;counter-reset:s;padding:0;margin:1.2rem 0;display:grid;gap:10px}
+.pipeline li{counter-increment:s;background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:12px 16px 12px 52px;position:relative}
+.pipeline li::before{content:counter(s);position:absolute;left:14px;top:12px;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;font:600 .85rem/26px var(--sans);text-align:center}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:1.2rem 0}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:14px 16px}
+.card h3{margin:0 0 .4rem}
+.card ul{margin:.2rem 0 0;padding-left:1.2em}
+.card li{margin:.25em 0}
+@media (max-width:620px){.two{grid-template-columns:1fr}}
+/* chart */
+.viz{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:16px 16px 8px;margin:1.3rem 0;position:relative;box-shadow:var(--shadow)}
+.viz-title{font:600 .95rem/1.4 var(--sans);color:var(--ink);margin:0}
+.viz-sub{font-size:.82rem;color:var(--muted);margin:.15rem 0 .4rem}
+.viz svg{display:block;width:100%;height:auto;overflow:visible}
+.viz .grid{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
+.viz .baseline{stroke:var(--axis);stroke-width:1;shape-rendering:crispEdges}
+.viz .tick{fill:var(--muted);font:11px var(--sans);font-variant-numeric:tabular-nums}
+.viz .cat{fill:var(--body);font:500 12px var(--sans)}
+.viz .n{fill:var(--muted);font:11px var(--sans)}
+.viz .val{fill:var(--ink);font:600 12px var(--sans)}
+.viz .bar{fill:var(--accent);transition:opacity .12s;pointer-events:none}
+.viz text{pointer-events:none}
+.viz .hit{fill:transparent;cursor:default;outline:none}
+.viz .hit:hover+.bar,.viz .hit:focus+.bar{opacity:.78}
+.viz .hit:focus-visible{stroke:var(--accent-line);stroke-width:2}
+.tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--rule);border-radius:8px;box-shadow:var(--shadow);padding:8px 10px;font-size:.8rem;line-height:1.4;color:var(--muted);opacity:0;transition:opacity .1s;white-space:nowrap;z-index:2}
+.tip strong{display:block;font-size:1rem;color:var(--ink)}
+.tip .key{display:inline-block;width:12px;height:2px;background:var(--accent);vertical-align:middle;margin-right:6px}
+footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--rule);font-size:.85rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<p class="kicker">Nemotron Nano 9B v2 Japanese · vLLM 0.15.1 · RTX 5090 · 2026-09-25</p>
+<h1>Decide, Don't Write</h1>
+<p class="dek">JEV の「書かせずに選ばせる」をローカルの Nemotron 9B で再現し、特許のタグ付けで確かめた記録</p>
+<p class="byline">soy-tuber · <a href="https://github.com/soy-tuber/nemotron">github.com/soy-tuber/nemotron</a></p>
+
+<div class="tiles" role="list">
+  <div class="tile" role="listitem"><div class="label">1回の判定（モデル読み込み済み）</div><div class="value">86 ms</div><div class="sub">同時32件で毎秒36件</div></div>
+  <div class="tile" role="listitem"><div class="label">確信度0.9以上のときの当たり</div><div class="value">82%</div><div class="sub">それ未満は67%前後</div></div>
+  <div class="tile" role="listitem"><div class="label">タグが付かない率（入力を差し替え）</div><div class="value">14.4% → 2.2%</div><div class="sub">生成方式のまま、入力だけ変更</div></div>
+  <div class="tile" role="listitem"><div class="label">本番の「該当なし」</div><div class="value">35.3万 → 2.5万</div><div class="sub">5.3時間で付け直し、失敗0件</div></div>
+</div>
+
+<p><strong>要点。</strong>JEV の考え方（文章を書かせず、決められた選択肢から1つ選ばせ、その確率を読む）は、汎用の 9B モデルと vLLM の <code>logprobs</code> だけで再現できた。1回の判定は 86 ms で、確信度は当たりやすさと連動する。ところが、特許に複数のタグを付ける仕事では、JEV 方式は当たりやすい代わりにタグが減り、速くもならなかった。いちばん効いたのは方式ではなく、モデルに渡す文章の差し替えだった。</p>
+
+<h2>文章を書かせず、選ばせる</h2>
+<p>JEV は、文章を生成する代わりに、決められた選択肢やスコアを確率付きで返す「判断専用」のモデルとされる。287件のオープンソース事例を調べた一覧（<a href="https://logicrw.github.io/awesome-jev-projects/?lang=en">awesome-jev-projects</a>）によると、使われ方はほぼ共通している。大きなモデルが長い文章や推論を受け持ち、JEV はその合間の小さな判断（どの操作か、残すか捨てるか、安全か）を受け持つ。</p>
+<p>ここでは JEV そのものではなく、同じ仕組みを手元のモデルで組んだ。リポジトリの <a href="https://github.com/soy-tuber/nemotron/tree/master/decide"><code>decide/</code></a> がそれで、既存の Nemotron ゲートウェイの上に乗る。</p>
+<ol class="pipeline">
+  <li>各選択肢に1トークンのラベル（<code>A</code>, <code>B</code>, … 尺度なら <code>1</code>〜<code>5</code>）を振り、選択肢の一覧と一緒に問う。</li>
+  <li>思考（reasoning）を切って数トークンだけ生成させ、先頭付近の <code>top_logprobs</code>（上位20件）を受け取る。</li>
+  <li>ラベル以外のトークンを捨て、ラベルの確率だけで合計が1になるよう割り直す。最大のものが答え、その確率が確信度になる。</li>
+  <li>割り直す前のラベルの確率の合計（<code>coverage</code>）が低いときや、確信度が下限を割ったときは、答えを出さずに保留する。</li>
+</ol>
+<p>生成した文章は読まないので、一覧にない答えは原理的に返らない。保証されるのは形式であって、中身が正しいことではない。だから確信度と <code>coverage</code> と保留を一緒に返し、迷ったものは人や大きなモデルに回せるようにした。</p>
+
+<h2>テストは57件通り、実機では1件も判定できなかった</h2>
+<p>最初の版は、クラウド上の Claude がリポジトリだけを見て書いた。ゲートウェイの設定やパーサーはリポジトリに入っていなかったので、偽の <code>logprobs</code> を流すモックのテストは誤った前提ごと通った。実機につなぐと、次の順につまずいた。</p>
+<div class="table-wrap">
+<table>
+<caption>実機で見つかった食い違い（すべて vLLM とモデルは変えずに直した）</caption>
+<thead><tr><th>症状</th><th>原因</th><th>直し方</th></tr></thead>
+<tbody>
+<tr><td>全件 404</td><td>vLLM は <code>--served-model-name</code> なしで起動しており、短い別名が通らない（ゲートウェイはモデルを起動したうえで 404 になる）</td><td>正式名 <code>nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese</code> を使う</td></tr>
+<tr><td>全件保留（coverage 0.001）</td><td>思考オフを <code>/no_think</code> で指示していたが、このモデルのチャットテンプレートには分岐がない。先頭の数トークンが英語の推論になり、ラベルの確率が残らない</td><td><code>chat_template_kwargs: {"enable_thinking": false}</code></td></tr>
+<tr><td>制約付きの予備経路が黙って効かなくなる</td><td>エラーが1回出ると旧名 <code>guided_choice</code> に切り替える作りだったが、vLLM 0.15.1 は未知のフィールドをエラーにせず無視する</td><td><code>structured_outputs</code> に固定し、自動切り替えを削除</td></tr>
+<tr><td>まとめて判定すると全件 500</td><td>接続エラーやタイムアウトを拾っていなかった</td><td>エラーを1件ごとに閉じ込める</td></tr>
+<tr><td>確信度が「較正済み」に見える</td><td>結果の項目名が <code>calibrated</code> だった</td><td><code>masked</code> に改名（制約なし ≠ 較正済み）</td></tr>
+</tbody>
+</table>
+</div>
+<p>直した後の版で、想定答えを付けた11件のうち9件が一致した。テストは61件（接続エラーなどを追加）。モックのテストは実機との食い違いを検出できないので、変更したら実機で一度流す、を手順に入れた。</p>
+
+<h2>1回 86 ms、同時32件で毎秒36件</h2>
+<div class="table-wrap">
+<table>
+<caption>問い合わせの振り分け（5択）をゲートウェイ経由で繰り返した結果。64件×2回の2回目</caption>
+<thead><tr><th class="num">同時実行</th><th class="num">件/秒</th><th class="num">中央値</th><th class="num">95%点</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td class="num">11.6</td><td class="num">86 ms</td><td class="num">89 ms</td></tr>
+<tr><td class="num">8</td><td class="num">28</td><td class="num">285 ms</td><td class="num">330 ms</td></tr>
+<tr><td class="num">32</td><td class="num">36</td><td class="num">752 ms</td><td class="num">1.2 s</td></tr>
+</tbody>
+</table>
+</div>
+<p>速さの出どころはモデルではなく、生成が数トークンで終わることと、vLLM が独立した判定をまとめて処理することにある。ただし同時8件あたりから伸びが鈍る。モデルが止まっているときの最初の1件は、ゲートウェイがモデルを起動するので約40秒かかる。tailnet 越し（Tailscale Serve）でも1回 104 ms だった。</p>
+
+<h2>特許のタグ付けでは、当たりやすいがタグが減り、速くならなかった</h2>
+<p>手元の特許DB（米国特許、CPC の G/H）では、以前から Nemotron に100種類のタグから1〜4個を JSON で書かせている（以下「生成方式」）。これを JEV 方式と比べた。</p>
+<ul>
+  <li>対象：G/H から無作為に選んだ1,000件。同時32件、ゲートウェイ経由。</li>
+  <li>JEV 方式：まず11の技術分野から1つ選ばせ、次にその分野の中のタグから選ばせる（1件あたり約2回）。2番目の分野の確率が0.3以上なら、そちらのタグも採る。</li>
+  <li>正解の目安：うち300件に Gemini 3.8 Flash で同じ100タグから付けさせたもの。</li>
+</ul>
+<div class="table-wrap">
+<table>
+<caption>入力はアブストラクト。一致は Gemini のタグとの比較（300件）、速度とタグなしは1,000件</caption>
+<thead><tr><th>方式</th><th class="num">件/秒</th><th class="num">タグなし</th><th class="num">先頭タグの一致</th><th class="num">適合率</th><th class="num">再現率</th><th class="num">F1</th><th class="num">タグ数/件</th></tr></thead>
+<tbody>
+<tr><td>生成方式</td><td class="num">19.5</td><td class="num">2.2%</td><td class="num">70%</td><td class="num">0.57</td><td class="num">0.50</td><td class="num">0.53</td><td class="num">2.85</td></tr>
+<tr><td>JEV 方式</td><td class="num">12.5</td><td class="num">0%</td><td class="num">78%</td><td class="num">0.75</td><td class="num">0.28</td><td class="num">0.41</td><td class="num">1.22</td></tr>
+<tr class="hl"><td>JEV の主タグ＋生成方式の追加タグ</td><td class="num">約7.6</td><td class="num">0%</td><td class="num">78%</td><td class="num">—</td><td class="num">—</td><td class="num">0.58</td><td class="num">—</td></tr>
+</tbody>
+</table>
+</div>
+<p>JEV 方式は付けたタグが当たりやすい（適合率 0.75 対 0.57）が、1件あたり1.2個しか付けないので取りこぼしが多い。しきい値を変えても、確率の分布が尖っているのでタグはほとんど増えなかった。速度も、2回呼ぶぶん生成方式より遅い。このモデル（Mamba2 とのハイブリッド）では共通部分のキャッシュ（prefix caching）が使えず、呼ぶたびに全文を読み直すことも効いている。両方を組み合わせると F1 は最も高いが、速度は両方の合計になる。</p>
+
+<h2>確信度は当たりやすさを示す</h2>
+<p>JEV 方式の取り柄は、どれだけ自信があるかを数字で返すことだ。1段目（分野）の確信度で区切ると、先頭タグが Gemini と一致する割合ははっきり分かれた。</p>
+<figure class="viz" id="calib" data-points='[{"label":"0.9以上","n":221,"v":81.9},{"label":"0.7〜0.9","n":46,"v":67.4},{"label":"0.5〜0.7","n":26,"v":65.4},{"label":"0.5未満","n":7,"v":71.4}]'>
+  <p class="viz-title">確信度ごとの、先頭タグが Gemini と一致した割合</p>
+  <p class="viz-sub">JEV 方式、入力はアブストラクト、300件。棒の下は件数</p>
+  <svg viewBox="0 0 560 250" role="img" aria-label="確信度0.9以上は221件で一致82%、0.7〜0.9は46件で67%、0.5〜0.7は26件で65%、0.5未満は7件で71%"></svg>
+  <div class="tip" role="status" aria-live="polite"></div>
+</figure>
+<div class="table-wrap">
+<table>
+<caption>同じ値の表</caption>
+<thead><tr><th>1段目の確信度</th><th class="num">件数</th><th class="num">全体に占める割合</th><th class="num">先頭タグの一致</th></tr></thead>
+<tbody>
+<tr><td>0.9以上</td><td class="num">221</td><td class="num">74%</td><td class="num">81.9%</td></tr>
+<tr><td>0.7〜0.9</td><td class="num">46</td><td class="num">15%</td><td class="num">67.4%</td></tr>
+<tr><td>0.5〜0.7</td><td class="num">26</td><td class="num">9%</td><td class="num">65.4%</td></tr>
+<tr><td>0.5未満</td><td class="num">7</td><td class="num">2%</td><td class="num">71.4%</td></tr>
+</tbody>
+</table>
+</div>
+<p>全体の74%を占める「0.9以上」は82%が一致し、それ未満はおおむね3分の2にとどまる（0.5未満は7件しかなく、値は当てにならない）。確信度の低い1割強だけを大きなモデルに回す、という使い方ができる。</p>
+
+<h2>いちばん効いたのは、方式ではなく入力だった</h2>
+<p>比較の途中で、生成方式が使っていた入力に問題が見つかった。本番のタグ付けは、特許の要約欄の先頭400字を読ませていた。ところがその<strong>25%は出願の定型文</strong>（<code>CROSS REFERENCE TO RELATED APPLICATION …</code>）で、発明の中身が書かれていない。モデルは正直に空の配列を返し、それが「該当なし」として残っていた。</p>
+<div class="callout">
+<p>例：「Gate drive circuit」の要約欄の先頭は、中国出願の優先権主張の定型文だけ。アブストラクトなら “A gate drive circuit is disclosed. The gate drive circuit comprises multi-stage of GOA drive unit …” と、発明そのものが書いてある。</p>
+</div>
+<p>入力をアブストラクト（別表にあり、サンプルの1,000件すべてに存在、中央値770字）に替えるだけで、生成方式のままタグが付かない率は <strong>14.4% から 2.2%</strong> に下がった。以前「該当なし」になった207件のうち199件にタグが付いた。</p>
+<h3>本番への反映</h3>
+<div class="table-wrap">
+<table>
+<caption>「該当なし」の付け直し（生成方式、入力はアブストラクト）</caption>
+<thead><tr><th>項目</th><th class="num">値</th></tr></thead>
+<tbody>
+<tr><td>対象（付け直し前の「該当なし」）</td><td class="num">353,242件</td></tr>
+<tr><td>タグが付いた</td><td class="num">328,410件（93%）</td></tr>
+<tr><td>「該当なし」のまま</td><td class="num">24,832件</td></tr>
+<tr><td>通信失敗</td><td class="num">0件</td></tr>
+<tr><td>所要時間</td><td class="num">5.3時間（毎秒18.6件）</td></tr>
+</tbody>
+</table>
+</div>
+<p>あわせて二つ直した。一つは、通信の失敗まで「該当なし」と同じ値で保存していたことで、これでは二度と処理し直されない。失敗は未処理のまま残すようにした。もう一つは全文検索の索引で、全体を作り直すスクリプトは索引を消してから全件を入れ直すため、その間は検索が空になる。索引は行単位で消せる設定（FTS5 の <code>contentless_delete=1</code>）だったので、タグが変わった328,410行だけを差し替えた。87秒で終わり、検索は止まらなかった。</p>
+
+<h2>JEV が向くところ、向かないところ</h2>
+<div class="two">
+  <div class="card">
+    <h3>向く：1つ選んで、自信の程度も知りたい</h3>
+    <ul>
+      <li>問い合わせや作業の振り分け</li>
+      <li>はい／いいえの審査（付いたタグが本当に当てはまるかの確認など）</li>
+      <li>絞り込んだ候補の中から1つ選ぶ</li>
+      <li>迷ったものだけ大きなモデルや人に回す</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>向かない</h3>
+    <ul>
+      <li>複数のタグを漏れなく付ける仕事（1件1.2個しか付かない）</li>
+      <li>速度を上げたいだけの場面（段数が増えると遅くなる）</li>
+      <li>実時間の制御ループ（1回86 ms、GPU 1枚）</li>
+      <li>要約や抽出など、文章そのものが要る仕事</li>
+    </ul>
+  </div>
+</div>
+
+<h2>この結果が言っていないこと</h2>
+<ul>
+  <li>Gemini のタグは正解ではなく目安にすぎない。1件平均3.2個と多めに付けるので、再現率はどの方式でも低めに出る。</li>
+  <li>一致の評価は300件なので、数ポイントの差は誤差の範囲。</li>
+  <li>試したのは Nemotron Nano 9B v2 Japanese と vLLM 0.15.1、RTX 5090 1枚の組み合わせだけ。</li>
+  <li>対象は米国特許の CPC G/H だけ。11分野の分け方は今回の試作。</li>
+  <li>本物の JEV は試していない。汎用のモデルで、考え方を再現したものにすぎない。</li>
+</ul>
+
+<h2>次にやるなら</h2>
+<ul>
+  <li>多めに付きがちなタグ（無関係な特許に付く「AI」など）だけ、JEV 方式のはい／いいえで確かめて外す。付いている特許だけを見ればよいので軽い。</li>
+  <li>分野・主タグ・確信度を別の列として足し、確信度0.7未満だけを大きなモデルで付け直す。</li>
+  <li>返させる候補の数を減らし、生成トークンを1〜2に絞って、判定の処理数を上げる。</li>
+</ul>
+
+<h2>再現する</h2>
+<p><code>decide/</code> は OpenAI 互換のエンドポイントに話すだけで、vLLM とは別の環境で動く。</p>
+<pre><code>git clone https://github.com/soy-tuber/nemotron &amp;&amp; cd nemotron
+uv venv decide/.venv --python 3.12
+uv pip install --python decide/.venv/bin/python -r requirements-decide.txt pytest
+
+# ゲートウェイ（既定 http://localhost:8000/v1）に向けて判定する
+decide/.venv/bin/python -m decide.cli route_inquiry --var input="先月の請求が二重に引き落とされています"
+
+# 速度を測る / テスト（モック、GPU 不要）
+decide/.venv/bin/python -m decide.bench --decision route_inquiry --repeat 64 --concurrency 1 8 32
+decide/.venv/bin/python -m pytest</code></pre>
+<p>接続先は <code>NEMOTRON_GATEWAY_URL</code>、モデルは <code>NEMOTRON_DECIDE_MODEL</code> で変えられる。詳しくは <a href="https://github.com/soy-tuber/nemotron/blob/master/decide/README.md"><code>decide/README.md</code></a>。特許タグ付けの試行スクリプトとデータは公開していない。</p>
+
+<footer>
+<p>モデル：<a href="https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese">NVIDIA-Nemotron-Nano-9B-v2-Japanese</a>（リビジョン固定）。推論：vLLM 0.15.1。GPU：RTX 5090（WSL2）。比較の目安：Gemini 3.8 Flash。</p>
+<p>JEV の事例一覧：<a href="https://github.com/logicrw/awesome-jev-projects">logicrw/awesome-jev-projects</a>。2026-09-25 · soy-tuber</p>
+</footer>
+</main>
+<script>
+(function(){
+  var fig = document.getElementById("calib");
+  if (!fig) return;
+  var data = JSON.parse(fig.getAttribute("data-points"));
+  var svg = fig.querySelector("svg"), tip = fig.querySelector(".tip");
+  var NS = "http://www.w3.org/2000/svg";
+  var W = 560, H = 250, L = 44, R = 12, T = 18, B = 48;
+  var pw = W - L - R, ph = H - T - B, band = pw / data.length, bw = 24, r = 4;
+  function el(name, attrs, text){
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    svg.appendChild(e);
+    return e;
+  }
+  function y(v){ return T + ph - (v / 100) * ph; }
+  [0, 25, 50, 75, 100].forEach(function(t){
+    if (t > 0) el("line", {x1: L, x2: W - R, y1: y(t), y2: y(t), "class": "grid"});
+    el("text", {x: L - 8, y: y(t) + 4, "text-anchor": "end", "class": "tick"}, t + "%");
+  });
+  el("line", {x1: L, x2: W - R, y1: y(0), y2: y(0), "class": "baseline"});
+  data.forEach(function(d, i){
+    var cx = L + band * i + band / 2, x = cx - bw / 2, top = y(d.v), base = y(0);
+    var hit = el("rect", {x: L + band * i + 4, y: T, width: band - 8, height: ph, "class": "hit", tabindex: 0,
+      "aria-label": d.label + "：" + d.n + "件、一致 " + d.v.toFixed(1) + "%"});
+    var path = "M" + x + "," + base + " V" + (top + r) + " Q" + x + "," + top + " " + (x + r) + "," + top +
+      " H" + (x + bw - r) + " Q" + (x + bw) + "," + top + " " + (x + bw) + "," + (top + r) + " V" + base + " Z";
+    el("path", {d: path, "class": "bar"});
+    el("text", {x: cx, y: base + 18, "text-anchor": "middle", "class": "cat"}, d.label);
+    el("text", {x: cx, y: base + 34, "text-anchor": "middle", "class": "n"}, d.n + "件");
+    if (i === 0) el("text", {x: cx, y: top - 8, "text-anchor": "middle", "class": "val"}, Math.round(d.v) + "%");
+    function show(){
+      tip.textContent = "";
+      var s = document.createElement("strong"); s.textContent = d.v.toFixed(1) + "%";
+      var k = document.createElement("span"); k.className = "key";
+      var t = document.createElement("span"); t.textContent = "確信度 " + d.label + "（" + d.n + "件）";
+      tip.appendChild(s); tip.appendChild(k); tip.appendChild(t);
+      var box = svg.getBoundingClientRect(), fb = fig.getBoundingClientRect(), sx = box.width / W;
+      var left = box.left - fb.left + cx * sx, topPx = box.top - fb.top + top * (box.height / H);
+      tip.style.left = Math.max(8, Math.min(left - tip.offsetWidth / 2, fig.clientWidth - tip.offsetWidth - 8)) + "px";
+      tip.style.top = Math.max(4, topPx - tip.offsetHeight - 10) + "px";
+      tip.style.opacity = 1;
+    }
+    function hide(){ tip.style.opacity = 0; }
+    hit.addEventListener("pointerenter", show);
+    hit.addEventListener("pointerleave", hide);
+    hit.addEventListener("focus", show);
+    hit.addEventListener("blur", hide);
+  });
+})();
+</script>
+</body>
+</html>
