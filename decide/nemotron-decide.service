@@ -1,0 +1,24 @@
+# /etc/systemd/system/nemotron-decide.service にコピーして:
+# Copy into /etc/systemd/system/ (system units only -- no ~/.config/systemd/user), then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nemotron-decide
+# 依存は decide/.venv に別建て / Dependencies live in their own venv:
+#   uv venv decide/.venv --python 3.12 && uv pip install --python decide/.venv/bin/python -r requirements-decide.txt
+[Unit]
+Description=Nemotron Decide (closed-set decisions on port 9200)
+After=nemotron-gateway.service
+Wants=nemotron-gateway.service
+
+[Service]
+Type=simple
+User=soy
+WorkingDirectory=/home/soy/nemotron
+Environment=PYTHONUNBUFFERED=1
+Environment=NEMOTRON_GATEWAY_URL=http://127.0.0.1:8000/v1
+Environment=NEMOTRON_DECIDE_MODEL=nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese
+Environment=NEMOTRON_DECISIONS=/home/soy/nemotron/decide/decisions.yaml
+ExecStart=/home/soy/nemotron/decide/.venv/bin/python -m uvicorn decide.server:app --host 127.0.0.1 --port 9200
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
