@@ -31,7 +31,7 @@ nemotron/
 ├── gateway/          # 統合ゲートウェイ / Unified gateway (FastAPI)
 │   ├── gateway.py    #   振り分け・モデル切替・ToolCall書換 / Routing, model swap, ToolCall rewrite
 │   └── models.yaml   #   モデルレジストリ / Model registry
-├── decide/           # 判断エンドポイント / Decision endpoint (port 8200)
+├── decide/           # 判断エンドポイント / Decision endpoint (port 9200)
 │   ├── decider.py    #   logprobsから確率分布を組む / Distribution from logprobs
 │   ├── schema.py     #   判断定義 / Decision definitions
 │   ├── decisions.yaml#   判断カタログ / Decision catalogue
@@ -66,7 +66,7 @@ Design goal: **"Look at this one directory to understand the entire Nemotron set
 ## アーキテクチャ / Architecture
 
 ```
-Client (OpenAI API)           Decide (port 8200)  ← 閉じた選択肢＋確信度
+Client (OpenAI API)           Decide (port 9200)  ← 閉じた選択肢＋確信度
   │                             │                   Closed options + confidence
   │      ┌──────────────────────┘
   ▼      ▼
@@ -117,13 +117,17 @@ is the **probability distribution over them**. The generated text is never
 parsed, so an off-catalogue value cannot occur.
 
 ```console
-$ python -m decide.cli route_inquiry --var input="先月の請求が二重に引き落とされています"
+$ decide/.venv/bin/python -m decide.cli route_inquiry --var input="先月の請求が二重に引き落とされています"
 route_inquiry: billing
-  confidence 0.912   coverage 0.981   118ms   [logprob]
-  billing       0.912 ███████████████████████████
-  technical     0.041 █
-  account       0.026 █
+  confidence 0.766   coverage 0.950   198ms   [logprob]
+  billing       0.766 ███████████████████████
+  technical     0.232 ███████
+  other         0.001
+  sales         0.001
+  account       0.000
 ```
+
+2026-09-25 実測 / measured: RTX 5090, vLLM 0.15.1.
 
 形式は保証されるが、**判断の中身が正しいことは保証されない**。そのために
 確信度 (`confidence`)、ラベル形式で答える気があったかの指標 (`coverage`)、
@@ -142,7 +146,7 @@ Details, limits, and the calibration caveats are in [`decide/README.md`](decide/
 - Ubuntu 24.04 (WSL2)
 - RTX 5090 (32GB VRAM)
 - Python 3.12 / vLLM / FastAPI
-- 判断エンドポイントの依存のみ別建て / Decision endpoint deps are separate: `pip install -r requirements-decide.txt`
+- 判断エンドポイントの依存は専用 venv に別建て / Decision endpoint deps live in their own venv: `uv venv decide/.venv && uv pip install --python decide/.venv/bin/python -r requirements-decide.txt`
 - systemdユーザーサービスで常駐 / Runs as systemd user services
 
 ## 登録モデル / Registered Models

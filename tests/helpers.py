@@ -24,7 +24,7 @@ def completion(positions: Sequence[Position], content: str | None = None) -> dic
     text = content if content is not None else "".join(e["token"] for e in entries)
     return {
         "id": "cmpl-test",
-        "model": "nemotron-9b-japanese",
+        "model": "nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese",
         "choices": [
             {
                 "index": 0,

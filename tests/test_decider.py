@@ -40,7 +40,7 @@ def test_distribution_is_renormalised_over_the_label_set():
 
     assert result.choice == "yes"
     assert result.method == "logprob"
-    assert result.calibrated
+    assert not result.masked
     assert result.confidence == pytest.approx(0.4 / 0.6)
     assert result.distribution["no"] == pytest.approx(0.2 / 0.6)
     assert result.coverage == pytest.approx(0.6)
@@ -173,6 +173,7 @@ def test_falls_back_to_constrained_decoding_when_no_label_appears():
         if index == 0:
             return completion([[("Sure", 0.9), (",", 0.1)]])
         assert body["structured_outputs"] == {"choice": ["A", "B"]}
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
         return completion([[("B", 0.95), ("A", 0.05)]])
 
     mock = transport(handler)
@@ -180,7 +181,7 @@ def test_falls_back_to_constrained_decoding_when_no_label_appears():
 
     assert mock.state["calls"] == 2
     assert result.method == "constrained"
-    assert not result.calibrated
+    assert result.masked
     assert result.choice == "no"
     assert any("inflated" in w for w in result.warnings)
 
@@ -196,23 +197,22 @@ def test_constrained_fallback_reads_text_when_logprobs_are_empty():
     assert result.confidence == pytest.approx(1.0)
 
 
-def test_constrained_fallback_retries_with_legacy_guided_choice():
+def test_constrained_fallback_error_is_raised_not_retried_as_guided_choice():
+    # vLLM 0.15.1 silently ignores guided_choice, so a retry with it would come
+    # back unconstrained while still being reported as "constrained".
     seen: list[dict] = []
 
     def handler(body, index):
         seen.append(body)
         if index == 0:
             return completion([[("Sure", 1.0)]])
-        if index == 1:
-            return httpx.Response(400, json={"error": "unknown field structured_outputs"})
-        assert body["guided_choice"] == ["A", "B"]
-        assert "structured_outputs" not in body
-        return completion([[("A", 1.0)]])
+        return httpx.Response(503, text="model busy")
 
-    result = run(decide(YES_NO, transport(handler)))
-    assert len(seen) == 3
-    assert result.choice == "yes"
-    assert result.method == "constrained"
+    with pytest.raises(GatewayError, match="503"):
+        run(decide(YES_NO, transport(handler)))
+    assert len(seen) == 2
+    assert seen[1]["structured_outputs"] == {"choice": ["A", "B"]}
+    assert "guided_choice" not in seen[1]
 
 
 def test_unparseable_constrained_answer_raises():
@@ -234,6 +234,17 @@ def test_http_error_becomes_gateway_error():
         run(decide(YES_NO, mock))
 
 
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectError("connection refused"), httpx.ReadTimeout("timed out")]
+)
+def test_transport_error_becomes_gateway_error(error):
+    def refuse(request):
+        raise error
+
+    with pytest.raises(GatewayError, match="cannot reach"):
+        run(decide(YES_NO, httpx.MockTransport(refuse)))
+
+
 def test_empty_choices_becomes_gateway_error():
     mock = httpx.MockTransport(lambda request: httpx.Response(200, json={"choices": []}))
     with pytest.raises(GatewayError, match="no choices"):
@@ -247,31 +258,50 @@ def test_request_asks_for_logprobs_and_greedy_decoding():
         captured.append(body)
         return completion([[("A", 1.0)]])
 
-    run(decide(YES_NO, transport(handler), model="nemotron-12b-v2-vl"))
+    run(decide(YES_NO, transport(handler), model="override-model"))
     body = captured[0]
     assert body["logprobs"] is True
     assert body["top_logprobs"] == 20
     assert body["temperature"] == 0.0
     assert body["max_tokens"] == 4
-    assert body["model"] == "nemotron-12b-v2-vl"
+    assert body["model"] == "override-model"
 
 
-def test_prompt_lists_labels_and_disables_thinking():
-    async def go():
-        async with Decider(transport=always([[("A", 1.0)]])) as decider:
-            return decider.build_messages(YES_NO)
+def test_default_model_is_the_full_id_vllm_serves():
+    captured: list[dict] = []
 
-    system, user = run(go())
-    assert system["content"].endswith("/no_think")
+    def handler(body, index):
+        captured.append(body)
+        return completion([[("A", 1.0)]])
+
+    run(decide(YES_NO, transport(handler)))
+    assert captured[0]["model"] == "nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese"
+
+
+def test_thinking_is_disabled_through_the_chat_template():
+    captured: list[dict] = []
+
+    def handler(body, index):
+        captured.append(body)
+        return completion([[("A", 1.0)]])
+
+    run(decide(YES_NO, transport(handler)))
+    system, user = captured[0]["messages"]
+    # The template ignores "/no_think"; only enable_thinking reaches it.
+    assert captured[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "/no_think" not in system["content"]
     assert "A. yes" in user["content"] and "B. no" in user["content"]
 
 
-def test_thinking_mode_keeps_the_system_prompt_untouched():
-    async def go():
-        async with Decider(transport=always([[("A", 1.0)]]), thinking=True) as decider:
-            return decider.build_messages(YES_NO)
+def test_thinking_mode_is_forwarded_to_the_chat_template():
+    captured: list[dict] = []
 
-    assert "/no_think" not in run(go())[0]["content"]
+    def handler(body, index):
+        captured.append(body)
+        return completion([[("A", 1.0)]])
+
+    run(decide(YES_NO, transport(handler), thinking=True))
+    assert captured[0]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 # -- batch ---------------------------------------------------------------
@@ -301,5 +331,5 @@ def test_result_to_dict_is_json_serialisable():
     result = run(decide(YES_NO, always([[("A", 0.75), ("B", 0.25)]])))
     payload = json.loads(json.dumps(result.to_dict()))
     assert payload["choice"] == "yes"
-    assert payload["calibrated"] is True
+    assert payload["masked"] is False
     assert payload["distribution"] == {"yes": 0.75, "no": 0.25}

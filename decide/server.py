@@ -1,10 +1,10 @@
 """HTTP service exposing the decision endpoint.
 
 Sits beside the gateway rather than inside it: the gateway owns model loading
-and swapping on port 8000, this owns the decision catalogue on port 8200 and
+and swapping on port 8000, this owns the decision catalogue on port 9200 and
 talks to the gateway as an ordinary OpenAI-compatible client.
 
-    uvicorn decide.server:app --host 127.0.0.1 --port 8200
+    uvicorn decide.server:app --host 127.0.0.1 --port 9200
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Nemotron Decide",
-    description="Closed-set decisions with calibrated confidence, served locally.",
+    description="Closed-set decisions with a confidence score, served locally.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -142,5 +142,7 @@ async def decide_batch(request: BatchRequest) -> dict[str, Any]:
                 return await _run(app, item)
             except HTTPException as exc:
                 return {"error": exc.detail, "status": exc.status_code}
+            except Exception as exc:  # one bad item must not sink the batch
+                return {"error": f"{type(exc).__name__}: {exc}", "status": 500}
 
     return {"results": await asyncio.gather(*(one(item) for item in request.items))}

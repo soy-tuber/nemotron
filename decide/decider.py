@@ -35,7 +35,11 @@ import httpx
 from .schema import Decision, DecisionError
 
 DEFAULT_BASE_URL = os.environ.get("NEMOTRON_GATEWAY_URL", "http://localhost:8000/v1")
-DEFAULT_MODEL = os.environ.get("NEMOTRON_DECIDE_MODEL", "nemotron-9b-japanese")
+# The full id: vLLM runs without --served-model-name, so a short alias such as
+# "nemotron-9b-japanese" makes the gateway load the model and vLLM answer 404.
+DEFAULT_MODEL = os.environ.get(
+    "NEMOTRON_DECIDE_MODEL", "nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese"
+)
 DEFAULT_TOP_LOGPROBS = 20  # vLLM's default --max-logprobs ceiling
 DEFAULT_SYSTEM = (
     "You are a decision function, not a chat assistant. "
@@ -73,9 +77,13 @@ class DecisionResult:
     warnings: list[str] = field(default_factory=list)
 
     @property
-    def calibrated(self) -> bool:
-        """True when ``confidence`` came from an unmasked distribution."""
-        return self.method == "logprob"
+    def masked(self) -> bool:
+        """True when ``confidence`` came from a constrained (masked) distribution.
+
+        Unmasked is not the same as calibrated: even then ``confidence`` is the
+        model's own, and thresholds have to be set from real data.
+        """
+        return self.method != "logprob"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,7 +94,7 @@ class DecisionResult:
             "distribution": {k: round(v, 6) for k, v in self.distribution.items()},
             "abstain": self.abstain,
             "method": self.method,
-            "calibrated": self.calibrated,
+            "masked": self.masked,
             "model": self.model,
             "latency_ms": round(self.latency_ms, 2),
             "reason": self.reason,
@@ -132,8 +140,6 @@ class Decider:
             headers=headers,
             transport=transport,
         )
-        # vLLM renamed the guided-decoding extras; discovered lazily, once.
-        self._structured_style = "modern"
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -151,9 +157,6 @@ class Decider:
         self, decision: Decision, variables: dict[str, Any] | None = None
     ) -> list[dict[str, str]]:
         system = decision.system or DEFAULT_SYSTEM
-        if not self.thinking:
-            # Nemotron Nano v2 reasoning switch: keep the first token decisive.
-            system = f"{system} /no_think"
         options = "\n".join(option.render() for option in decision.options)
         header = (
             "選択肢 / Options"
@@ -170,7 +173,14 @@ class Decider:
     # -- transport -------------------------------------------------------
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        response = await self._client.post("/chat/completions", json=payload)
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+        except httpx.HTTPError as exc:
+            # Connection refused, timeouts (a cold start or a failed model load
+            # on the gateway) -- report them like any other gateway failure.
+            raise GatewayError(
+                f"cannot reach {self.base_url}/chat/completions: {exc!r}"
+            ) from exc
         if response.status_code >= 400:
             raise GatewayError(
                 f"{response.status_code} from {self.base_url}/chat/completions: "
@@ -179,9 +189,16 @@ class Decider:
         return response.json()
 
     def _structured_extra(self, labels: Sequence[str]) -> dict[str, Any]:
-        if self._structured_style == "legacy":
-            return {"guided_choice": list(labels)}
+        # vLLM 0.15.1 only understands ``structured_outputs``. The old
+        # ``guided_choice`` is not rejected but silently ignored (requests allow
+        # extra fields), so there is no error to detect a fallback from.
         return {"structured_outputs": {"choice": list(labels)}}
+
+    def _chat_template_kwargs(self) -> dict[str, Any]:
+        # Nemotron Nano v2's chat template only honours ``enable_thinking``; a
+        # "/no_think" in the prompt is ignored, the first tokens become
+        # reasoning, and no label mass is left to read.
+        return {"chat_template_kwargs": {"enable_thinking": self.thinking}}
 
     # -- core ------------------------------------------------------------
 
@@ -210,6 +227,7 @@ class Decider:
             "temperature": 0.0,
             "logprobs": True,
             "top_logprobs": self.top_logprobs,
+            **self._chat_template_kwargs(),
         }
         data = await self._post(payload)
         positions = _logprob_positions(data)
@@ -248,19 +266,10 @@ class Decider:
             "temperature": 0.0,
             "logprobs": True,
             "top_logprobs": self.top_logprobs,
+            **self._chat_template_kwargs(),
             **self._structured_extra(decision.labels),
         }
-        try:
-            data = await self._post(payload)
-        except GatewayError:
-            if self._structured_style != "modern":
-                raise
-            # Older vLLM: structured_outputs is unknown, guided_choice is not.
-            self._structured_style = "legacy"
-            payload = {
-                k: v for k, v in payload.items() if k != "structured_outputs"
-            } | self._structured_extra(decision.labels)
-            data = await self._post(payload)
+        data = await self._post(payload)
 
         positions = _logprob_positions(data)
         distribution, coverage, _ = _best_position(positions, decision, 0.0)

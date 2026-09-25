@@ -43,7 +43,7 @@ def test_decide_by_name_returns_the_distribution(client):
 
     assert body["choice"] == "billing"
     assert body["confidence"] == pytest.approx(0.9)
-    assert body["calibrated"] is True
+    assert body["masked"] is False
     assert set(body["distribution"]) == {
         "billing",
         "technical",
@@ -111,3 +111,30 @@ def test_batch_keeps_position_and_isolates_failures(client):
 
     assert [r.get("choice") for r in results] == ["escalate", None, "escalate"]
     assert results[1]["status"] == 502
+
+
+def test_batch_isolates_transport_errors(client):
+    state = {"calls": 0}
+
+    def respond(request):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise httpx.ReadTimeout("gateway still loading the model", request=request)
+        return httpx.Response(200, json=completion([[("A", 1.0)]]))
+
+    use(httpx.MockTransport(respond), client)
+    results = client.post(
+        "/v1/decide/batch",
+        json={
+            "concurrency": 1,
+            "items": [
+                {"decision": "needs_human", "variables": {"input": "a"}},
+                {"decision": "needs_human", "variables": {"input": "b"}},
+                {"decision": "needs_human", "variables": {"input": "c"}},
+            ],
+        },
+    ).json()["results"]
+
+    assert [r.get("choice") for r in results] == ["escalate", None, "escalate"]
+    assert results[1]["status"] == 502
+    assert "cannot reach" in results[1]["error"]
