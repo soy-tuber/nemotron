@@ -31,6 +31,14 @@ nemotron/
 ├── gateway/          # 統合ゲートウェイ / Unified gateway (FastAPI)
 │   ├── gateway.py    #   振り分け・モデル切替・ToolCall書換 / Routing, model swap, ToolCall rewrite
 │   └── models.yaml   #   モデルレジストリ / Model registry
+├── decide/           # 判断エンドポイント / Decision endpoint (port 9200)
+│   ├── decider.py    #   logprobsから確率分布を組む / Distribution from logprobs
+│   ├── schema.py     #   判断定義 / Decision definitions
+│   ├── decisions.yaml#   判断カタログ / Decision catalogue
+│   ├── server.py     #   FastAPI (/v1/decide)
+│   ├── cli.py        #   コマンドライン / Command line
+│   ├── bench.py      #   レイテンシ計測 / Latency benchmark
+│   └── nemotron-decide.service  # systemdユニット / systemd unit
 ├── parsers/          # vLLMカスタムパーサー / Custom vLLM parsers (→ symlink)
 │   ├── nemotron_nano_v2_reasoning_parser.py   # <think>タグ抽出 / Thinking extraction
 │   ├── nemotron_tool_parser.py                # ToolCall解析 / ToolCall parsing
@@ -58,9 +66,10 @@ Design goal: **"Look at this one directory to understand the entire Nemotron set
 ## アーキテクチャ / Architecture
 
 ```
-Client (OpenAI API)
-  │
-  ▼
+Client (OpenAI API)           Decide (port 9200)  ← 閉じた選択肢＋確信度
+  │                             │                   Closed options + confidence
+  │      ┌──────────────────────┘
+  ▼      ▼
 Gateway (port 8000)           ← モデル切替・ToolCall書換・アイドル監視
   │                              Model swap, ToolCall rewrite, idle watchdog
   ▼
@@ -95,11 +104,49 @@ Three parsers injected via vLLM's plugin system:
 
 The streaming ToolCall parser reconstructs incomplete JSON fragments via `partial_json_parser` and emits only deltas.
 
+## 判断エンドポイント / Decision endpoint
+
+同じモデルを、**文章を書かせずに「選ばせる」だけ**に使う口も用意している。
+選択肢は `decide/decisions.yaml` に宣言し、返るのは選択肢そのものではなく
+**その上の確率分布**。生成テキストは一切パースしないので、カタログ外の値は
+原理的に返らない。
+
+The same model is also exposed as a port where it **never writes prose — it only
+chooses**. Options are declared in `decide/decisions.yaml`, and what comes back
+is the **probability distribution over them**. The generated text is never
+parsed, so an off-catalogue value cannot occur.
+
+```console
+$ decide/.venv/bin/python -m decide.cli route_inquiry --var input="先月の請求が二重に引き落とされています"
+route_inquiry: billing
+  confidence 0.766   coverage 0.950   198ms   [logprob]
+  billing       0.766 ███████████████████████
+  technical     0.232 ███████
+  other         0.001
+  sales         0.001
+  account       0.000
+```
+
+2026-09-25 実測 / measured: RTX 5090, vLLM 0.15.1.
+
+形式は保証されるが、**判断の中身が正しいことは保証されない**。そのために
+確信度 (`confidence`)、ラベル形式で答える気があったかの指標 (`coverage`)、
+そして下限を割ったときの棄権 (`abstain`) がある。迷ったものは人に渡す。
+
+The format is guaranteed; **the judgement being correct is not**. That is what
+`confidence`, `coverage` (did it answer in label form at all), and the `abstain`
+path below those floors are for — what it is unsure about goes to a human.
+
+詳細・制限・較正の注意は [`decide/README.md`](decide/README.md)。
+
+Details, limits, and the calibration caveats are in [`decide/README.md`](decide/README.md).
+
 ## 動作環境 / Requirements
 
 - Ubuntu 24.04 (WSL2)
 - RTX 5090 (32GB VRAM)
 - Python 3.12 / vLLM / FastAPI
+- 判断エンドポイントの依存は専用 venv に別建て / Decision endpoint deps live in their own venv: `uv venv decide/.venv && uv pip install --python decide/.venv/bin/python -r requirements-decide.txt`
 - systemdユーザーサービスで常駐 / Runs as systemd user services
 
 ## 登録モデル / Registered Models
